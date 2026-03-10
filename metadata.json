@@ -1,0 +1,5 @@
+{
+  "name": "Document Merger",
+  "description": "Drag and drop PDF and DOCX files, reorder them, and merge into a single PDF.",
+  "requestFramePermissions": []
+}
