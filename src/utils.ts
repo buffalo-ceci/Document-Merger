@@ -9,22 +9,44 @@ if (typeof window !== 'undefined') {
 }
 
 export async function convertDocxToPdf(file: File): Promise<ArrayBuffer> {
-  const container = document.createElement('div');
-  
-  // We use a fixed width that corresponds to A4 at 96 DPI (approx 794px)
-  // docx-preview will try to render pages inside this.
-  container.style.width = '800px'; 
-  container.style.position = 'absolute';
-  container.style.left = '0';
-  container.style.top = '0';
-  container.style.zIndex = '-9999'; // Hide behind other elements
-  container.style.background = '#e0e0e0'; // docx-preview usually renders white pages on a gray background
-  
-  document.body.appendChild(container);
+  const iframe = document.createElement('iframe');
+
+  // Let docx-preview use the document's own page dimensions by isolating in an iframe
+  iframe.style.position = 'absolute';
+  iframe.style.left = '-9999px';
+  iframe.style.top = '-9999px';
+  iframe.style.width = '1200px';
+  iframe.style.height = '1200px';
+  document.body.appendChild(iframe);
 
   try {
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (!iframeDoc) throw new Error("Could not access iframe document");
+
+    iframeDoc.open();
+    iframeDoc.write(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <style>
+            body { margin: 0; padding: 0; background: #e0e0e0; color: #000; font-family: "Microsoft JhengHei", "PMingLiU", "MingLiU", "DFKai-SB", sans-serif; }
+            table { border-collapse: collapse; }
+            .docx-wrapper { padding: 0 !important; }
+            section.docx { box-shadow: none !important; margin: 0 !important; }
+          </style>
+        </head>
+        <body>
+          <div id="docx-container"></div>
+        </body>
+      </html>
+    `);
+    iframeDoc.close();
+
+    const container = iframeDoc.getElementById('docx-container') as HTMLElement;
+
     const arrayBuffer = await file.arrayBuffer();
-    
+
     await renderAsync(arrayBuffer, container, null, {
       className: 'docx', // class name/prefix for default and mathml elements
       inWrapper: true, // enables rendering of wrapper around document content
@@ -36,17 +58,19 @@ export async function convertDocxToPdf(file: File): Promise<ArrayBuffer> {
       experimental: true, // enables experimental features (tab stops calculation)
       trimXmlDeclaration: true, // if true, xml declaration will be removed from xml string before parsing
       useBase64URL: true, // if true, images, fonts, etc. will be converted to base 64 URL, otherwise URL.createObjectURL is used
-      useMathMLPolyfill: false, // includes MathML polyfills for chrome, edge, etc.
-      showChanges: false, // experimental: show tracked changes
       debug: false, // enables additional logging
+      renderHeaders: true, // render headers
+      renderFooters: true, // render footers
+      renderFootnotes: true,
+      renderEndnotes: true,
     });
 
     // Remove unsupported images like WMF/EMF which cause html2canvas to crash
     const images = container.querySelectorAll('img');
     images.forEach(img => {
       if (
-        img.src.startsWith('data:image/x-wmf') || 
-        img.src.startsWith('data:image/wmf') || 
+        img.src.startsWith('data:image/x-wmf') ||
+        img.src.startsWith('data:image/wmf') ||
         img.src.startsWith('data:image/x-emf') ||
         img.src.startsWith('data:image/emf')
       ) {
@@ -66,58 +90,69 @@ export async function convertDocxToPdf(file: File): Promise<ArrayBuffer> {
     const sections = Array.from(container.querySelectorAll('section.docx'));
     const elementsToRender = sections.length > 0 ? sections : [container];
 
-    const doc = new jsPDF({
+    const pdfDoc = new jsPDF({
       orientation: 'portrait',
       unit: 'pt',
       format: 'a4'
     });
 
-    const pdfWidth = doc.internal.pageSize.getWidth();
-    const pdfHeight = doc.internal.pageSize.getHeight();
+    const pdfWidth = pdfDoc.internal.pageSize.getWidth();
+    const pdfHeight = pdfDoc.internal.pageSize.getHeight();
 
     for (let i = 0; i < elementsToRender.length; i++) {
       const el = elementsToRender[i] as HTMLElement;
-      
+
       // Ensure the section has a white background for the PDF
       const originalBg = el.style.background || el.style.backgroundColor;
+      const originalBoxShadow = el.style.boxShadow;
+      const originalMargin = el.style.margin;
+
       el.style.backgroundColor = '#ffffff';
+      el.style.boxShadow = 'none';
+      el.style.margin = '0';
 
       const canvas = await html2canvas(el, {
         scale: 2, // Better quality
         useCORS: true,
         logging: false,
-        backgroundColor: '#ffffff'
-      });
+        backgroundColor: '#ffffff',
+        // Make sure html2canvas uses the isolated iframe window to parse CSS properly
+        window: iframe.contentWindow as unknown as Window
+      } as any);
 
       // Restore background just in case
       el.style.background = originalBg;
+      el.style.boxShadow = originalBoxShadow;
+      el.style.margin = originalMargin;
 
       const imgData = canvas.toDataURL('image/jpeg', 0.95);
-      const imgProps = doc.getImageProperties(imgData);
+      const imgProps = pdfDoc.getImageProperties(imgData);
       const imgHeight = (imgProps.height * pdfWidth) / imgProps.width;
-      
+
       if (i > 0) {
-        doc.addPage();
+        pdfDoc.addPage();
       }
-      
+
       let heightLeft = imgHeight;
       let position = 0;
 
-      doc.addImage(imgData, 'JPEG', 0, position, pdfWidth, imgHeight);
+      pdfDoc.addImage(imgData, 'JPEG', 0, position, pdfWidth, imgHeight);
       heightLeft -= pdfHeight;
 
       // If the section is somehow taller than A4, slice it (fallback)
       while (heightLeft > 0) {
         position = heightLeft - imgHeight;
-        doc.addPage();
-        doc.addImage(imgData, 'JPEG', 0, position, pdfWidth, imgHeight);
+        pdfDoc.addPage();
+        pdfDoc.addImage(imgData, 'JPEG', 0, position, pdfWidth, imgHeight);
         heightLeft -= pdfHeight;
       }
     }
 
-    return doc.output('arraybuffer');
+    return pdfDoc.output('arraybuffer');
   } finally {
-    document.body.removeChild(container);
+    if (document.body.contains(iframe)) {
+      document.body.removeChild(iframe);
+    }
   }
 }
 
@@ -126,7 +161,7 @@ export async function mergeFiles(files: File[]): Promise<Uint8Array> {
 
   for (const file of files) {
     let pdfBuffer: ArrayBuffer;
-    
+
     if (file.name.toLowerCase().endsWith('.pdf')) {
       pdfBuffer = await file.arrayBuffer();
     } else if (file.name.toLowerCase().endsWith('.docx')) {
