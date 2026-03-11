@@ -21,11 +21,14 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 18
-          cache: 'npm'
+          node-version: 20
+          # 暫時移除 cache: 'npm' 以強制重新抓取正確的原生套件
 
-      - name: Install Dependencies
-        run: npm install
+      - name: Clean and Install Dependencies
+        # 刪除舊有 lock 檔並強制安裝，確保 native bindings 與環境匹配
+        run: |
+          rm -rf node_modules package-lock.json
+          npm install
 
       - name: Build
         run: npm run build
